@@ -448,13 +448,18 @@ Python允许你将类存储在模块中，然后在主程序中导入所需的�
 
 # 文件
 
-打开文件：with open(file_path) as file_object
+打开文件：
+with open(file_path) as file_object
 
-读取文件：file_object.read()
-
-
+整体读取文件：
+lines = file_object.read()
+print(lines)
 
 逐行读取文件：
+filename = 'xxx'
+with open(filename) as file_object:
+    for line in file_object:
+        print(line.rstrip())
 
 
 
