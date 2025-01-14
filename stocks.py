@@ -95,39 +95,53 @@ def get_stock_data(stock_code, date_period):
 
 # 计算技术指标
 def calculate_indicators(df):
-    # 计算5日均线
+    # 计算5日均线和20日均线
     df['MA5'] = df['close'].rolling(window=5).mean()
+    df['MA20'] = df['close'].rolling(window=20).mean()
     
     # 计算MA5的斜率
     df['MA5_slope'] = df['MA5'].diff()
     
+    # 计算成交量的变化（例如5日平均成交量）
+    df['Volume_MA5'] = df['vol'].rolling(window=5).mean()
+    
     df.fillna(0, inplace=True)
     return df
 
-def detect_signals(df):
+def detect_signals(df, buy_volume_ratio=0.05, sell_volume_ratio=0.05):
+    """
+    生成买卖信号
+    :param df: 包含股票数据的DataFrame
+    :param buy_volume_ratio: 买入点成交量放大比例（默认5%）
+    :param sell_volume_ratio: 卖出点成交量放大比例（默认5%）
+    :return: 包含买卖信号的DataFrame
+    """
     df['signal'] = 0  # 初始化信号列
 
-    # 买入信号：MA5斜率在某一日为正值，前一天也是正值，再前一天为负值
-    df['buy_signal'] = False
-    for i in range(len(df)):
-        if i >= 4:  # 确保有足够的历史数据
-            # 检查斜率是否满足条件
-            if df.loc[df.index[i], 'MA5_slope'] > 0 and df.loc[df.index[i-1], 'MA5_slope'] > 0 and df.loc[df.index[i-2], 'MA5_slope'] < 0 and df.loc[df.index[i-3], 'MA5_slope'] < 0:
-                df.loc[df.index[i], 'buy_signal'] = True
-    
-    # 卖出信号：MA5斜率从正变负
-    df['sell_signal'] = (df['MA5_slope'] < 0) & (df['MA5_slope'].shift(1) > 0)
-    
+    # 买入信号条件
+    df['buy_signal'] = (
+        (df['MA5_slope'] > 0) &  # 当前交易日MA5斜率为正
+        (df['MA5_slope'].shift(1) < 0) &  # 上一个交易日MA5斜率为正
+        (df['vol'] > (1 + buy_volume_ratio) * df['vol'].shift(1))  # 当前交易日成交量放大一定比例
+    )
+
+    # 卖出信号条件
+    df['sell_signal'] = (
+        (df['MA5_slope'] < 0) &  # 当前交易日MA5斜率为负
+        (df['MA5_slope'].shift(1) > 0) &  # 上一个交易日MA5斜率为负
+        (df['vol'] > (1 + sell_volume_ratio) * df['vol'].shift(1))  # 当前交易日成交量放大一定比例
+    )
+
     # 标记买入和卖出信号
     df.loc[df['buy_signal'], 'signal'] = 1
     df.loc[df['sell_signal'], 'signal'] = -1
-    
+
     # 记录信号出现的日期和收盘价
     df['buy_date'] = df['trade_date'].where(df['buy_signal'])
     df['buy_close'] = df['close'].where(df['buy_signal'])
     df['sell_date'] = df['trade_date'].where(df['sell_signal'])
     df['sell_close'] = df['close'].where(df['sell_signal'])
-    
+
     return df
 
 def calculate_return(df, initial_cash=100000, date_period=365):
@@ -250,6 +264,38 @@ class InputScreen(Screen):
         stock_name_layout.add_widget(self.stock_code_input)
         left_layout.add_widget(stock_name_layout)
 
+        # 买入点成交量放大比例输入框
+        buy_volume_layout = BoxLayout(orientation='horizontal', size_hint_y=10, height=40)
+        buy_volume_label = Label(text='买入成交量放大:', size_hint_x=1, font_name='STKAITI', font_size=30)
+        self.buy_volume_input = TextInput(
+            text='0.05', 
+            hint_text='(如 0.05)', 
+            multiline=False, 
+            font_name='STKAITI', 
+            font_size=30, 
+            size_hint_x=0.7,
+            halign='center'
+        )
+        buy_volume_layout.add_widget(buy_volume_label)
+        buy_volume_layout.add_widget(self.buy_volume_input)
+        left_layout.add_widget(buy_volume_layout)
+
+        # 卖出点成交量放大比例输入框
+        sell_volume_layout = BoxLayout(orientation='horizontal', size_hint_y=10, height=40)
+        sell_volume_label = Label(text='卖出成交量放大:', size_hint_x=1, font_name='STKAITI', font_size=30)
+        self.sell_volume_input = TextInput(
+            text='0.05', 
+            hint_text='(如 0.05)', 
+            multiline=False, 
+            font_name='STKAITI', 
+            font_size=30, 
+            size_hint_x=0.7,
+            halign='center'
+        )
+        sell_volume_layout.add_widget(sell_volume_label)
+        sell_volume_layout.add_widget(self.sell_volume_input)
+        left_layout.add_widget(sell_volume_layout)
+
         # 运行按钮
         self.run_button = Button(
             text='点击运行', 
@@ -273,7 +319,6 @@ class InputScreen(Screen):
         )
         self.next_button.bind(on_press=self.go_to_sell_screen)
         left_layout.add_widget(self.next_button)
-        
 
         # 右侧布局（结果显示标签）
         right_layout = BoxLayout(orientation='vertical', size_hint_x=1, spacing=10)
@@ -310,13 +355,12 @@ class InputScreen(Screen):
         else:
             check_input1_ok = False
             message += '^o^ 请输入正确的回溯日期 ^o^\n'
-            
-            
+        
         for code, name in HS300_STOCKS.items():
             if self.stock_code_input.text == code:
                 check_input2_ok = True
                 break
-                
+            
         if check_input2_ok:
             message += ''
         else:
@@ -325,8 +369,11 @@ class InputScreen(Screen):
         if check_input1_ok and check_input2_ok:
             date_period = int(self.date_period_input.text)
             stock_code = self.stock_code_input.text
+            buy_volume_ratio = float(self.buy_volume_input.text)  # 获取买入点成交量放大比例
+            sell_volume_ratio = float(self.sell_volume_input.text)  # 获取卖出点成交量放大比例
+
             # 运行主函数
-            self.stock_name, self.total_return, self.annualized_return = main(date_period, self.manager.get_screen('sell_screen'), stock_code)
+            self.stock_name, self.total_return, self.annualized_return = main(date_period, self.manager.get_screen('sell_screen'), stock_code, buy_volume_ratio, sell_volume_ratio)
 
             # 更新 result_label 显示总体收益和年化收益
             self.result_label.text = f"{self.stock_name}\n 总收益率: {self.total_return:.2f}%\n年化收益率: {self.annualized_return:.2f}%"
@@ -338,7 +385,7 @@ class InputScreen(Screen):
         self.manager.current = 'sell_screen'
 
 # 修改 main 函数以返回总体收益和年化收益
-def main(date_period, sell_screen, stock_code):
+def main(date_period, sell_screen, stock_code, buy_volume_ratio, sell_volume_ratio):
     sell_stocks = []
     all_signals = []  # 用于存储所有买卖点
     stock_name = 'OTHER'
@@ -354,7 +401,7 @@ def main(date_period, sell_screen, stock_code):
             try:
                 df = get_stock_data(stock_code, date_period)
                 df = calculate_indicators(df)
-                df = detect_signals(df)
+                df = detect_signals(df, buy_volume_ratio, sell_volume_ratio)  # 传递成交量放大比例
 
                 # 计算总收益率和年化收益率
                 total_return, annualized_return = calculate_return(df, date_period=date_period)
