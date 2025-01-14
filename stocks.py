@@ -325,7 +325,7 @@ class InputScreen(Screen):
 
         # 结果显示标签
         self.result_label = Label(
-            text='Developed by 玉帛书影', 
+            text='Developed by 玉帛书影\n\n\t\t中国人寿 -- 601628.SH\n\t\t工商银行 -- 601398.SH\n\t\t长江电力 -- 600900.SH', 
             size_hint_y=10, 
             height=100, 
             font_name='STKAITI', 
