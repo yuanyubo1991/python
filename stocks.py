@@ -5,6 +5,7 @@ from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.scrollview import ScrollView
+from kivy.uix.spinner import Spinner
 from kivy.core.text import LabelBase
 import datetime as dt
 import pandas as pd
@@ -108,29 +109,61 @@ def calculate_indicators(df):
     df.fillna(0, inplace=True)
     return df
 
-def detect_signals(df, buy_volume_ratio=0.05, sell_volume_ratio=0.05):
+def detect_signals(df, buy_volume_ratio=0.05, sell_volume_ratio=0.05, sell_above_buy=True, buy_below_sell=True):
     """
     生成买卖信号
     :param df: 包含股票数据的DataFrame
     :param buy_volume_ratio: 买入点成交量放大比例（默认5%）
     :param sell_volume_ratio: 卖出点成交量放大比例（默认5%）
+    :param sell_above_buy: 卖出点价格必须高于上一个买入点
+    :param buy_below_sell: 买入点价格必须低于上一个卖出点
     :return: 包含买卖信号的DataFrame
     """
     df['signal'] = 0  # 初始化信号列
+    df['buy_signal'] = False
+    df['sell_signal'] = False
 
-    # 买入信号条件
-    df['buy_signal'] = (
-        (df['MA5_slope'] > 0) &  # 当前交易日MA5斜率为正
-        (df['MA5_slope'].shift(1) < 0) &  # 上一个交易日MA5斜率为正
-        (df['vol'] > (1 + buy_volume_ratio) * df['vol'].shift(1))  # 当前交易日成交量放大一定比例
-    )
+    # 用于记录最新的买入点和卖出点的价格
+    last_buy_price = None
+    last_sell_price = None
 
-    # 卖出信号条件
-    df['sell_signal'] = (
-        (df['MA5_slope'] < 0) &  # 当前交易日MA5斜率为负
-        (df['MA5_slope'].shift(1) > 0) &  # 上一个交易日MA5斜率为负
-        (df['vol'] > (1 + sell_volume_ratio) * df['vol'].shift(1))  # 当前交易日成交量放大一定比例
-    )
+    # 确保数据按日期从前往后排序
+    df = df.sort_values('trade_date', ascending=True).reset_index(drop=True)
+    
+    #print(df[['trade_date', 'close', 'MA5_slope', 'vol']])  # 打印后几行数据
+    # 遍历数据框，生成买卖信号（从前往后）
+    for i in range(1, len(df)):
+        # 买入信号条件
+        buy_condition = (
+            (df.loc[i, 'MA5_slope'] > 0) &  # 当前交易日MA5斜率为正
+            (i > 0 and df.loc[i-1, 'MA5_slope'] < 0) &  # 上一个交易日MA5斜率为负
+            (df.loc[i, 'vol'] > (1 + buy_volume_ratio) * df.loc[i-1, 'vol'])  # 当前交易日成交量放大一定比例
+        )
+
+        # 如果启用了买入点价格必须低于上一个卖出点的限制
+        if buy_below_sell and last_sell_price is not None:
+            buy_condition &= (df.loc[i, 'close'] < last_sell_price)  # 当前价格低于上一个卖出点价格
+
+        if buy_condition:
+            df.loc[i, 'buy_signal'] = True
+            last_buy_price = df.loc[i, 'close']  # 更新最新的买入点价格
+            #print(f"买入点: 日期={df.loc[i, 'trade_date']}, 价格={df.loc[i, 'close']}, 上一个卖出点价格={last_sell_price}")
+
+        # 卖出信号条件
+        sell_condition = (
+            (df.loc[i, 'MA5_slope'] < 0) &  # 当前交易日MA5斜率为负
+            (i > 0 and df.loc[i-1, 'MA5_slope'] > 0) &  # 上一个交易日MA5斜率为正
+            (df.loc[i, 'vol'] > (1 + sell_volume_ratio) * df.loc[i-1, 'vol'])  # 当前交易日成交量放大一定比例
+        )
+
+        # 如果启用了卖出点价格必须高于上一个买入点的限制
+        if sell_above_buy and last_buy_price is not None:
+            sell_condition &= (df.loc[i, 'close'] > last_buy_price)  # 当前价格高于上一个买入点价格
+
+        if sell_condition:
+            df.loc[i, 'sell_signal'] = True
+            last_sell_price = df.loc[i, 'close']  # 更新最新的卖出点价格
+            #print(f"卖出点: 日期={df.loc[i, 'trade_date']}, 价格={df.loc[i, 'close']}, 上一个买入点价格={last_buy_price}")
 
     # 标记买入和卖出信号
     df.loc[df['buy_signal'], 'signal'] = 1
@@ -206,7 +239,7 @@ class SellScreen(Screen):
     def update_content(self, all_signals, total_return, annualized_return):
         if all_signals:
             # 按照日期顺序显示所有买卖点
-            formatted_text = "操作      日期      收盘价\n"
+            formatted_text = "股票名称      操作       日期       收盘价\n"
             for signal in all_signals:
                 date, text, signal_type = signal
                 if signal_type == 'buy':
@@ -234,7 +267,7 @@ class InputScreen(Screen):
 
         # 回溯天数输入框及其提示词
         date_period_layout = BoxLayout(orientation='horizontal', size_hint_y=10, height=40)
-        date_period_label = Label(text='回溯天数:', size_hint_x=1, font_name='STKAITI', font_size=30)
+        date_period_label = Label(text='回溯天数', size_hint_x=1, font_name='STKAITI', font_size=30)
         self.date_period_input = TextInput(
             text='365', 
             hint_text='(如 365)', 
@@ -250,10 +283,10 @@ class InputScreen(Screen):
 
         # 股票名称输入框及其提示词
         stock_name_layout = BoxLayout(orientation='horizontal', size_hint_y=10, height=40)
-        stock_name_label = Label(text='股票代码:', size_hint_x=1, font_name='STKAITI', font_size=30)
-        self.stock_code_input = TextInput(
-            text='601628.SH', 
-            hint_text='(例 601628.SH)', 
+        stock_name_label = Label(text='股票代码', size_hint_x=1, font_name='STKAITI', font_size=30)
+        self.stock_name_input = TextInput(
+            text='中国人寿', 
+            hint_text='(例 工商银行)', 
             multiline=False, 
             font_name='STKAITI', 
             font_size=30, 
@@ -261,14 +294,14 @@ class InputScreen(Screen):
             halign='center'
         )
         stock_name_layout.add_widget(stock_name_label)
-        stock_name_layout.add_widget(self.stock_code_input)
+        stock_name_layout.add_widget(self.stock_name_input)
         left_layout.add_widget(stock_name_layout)
 
         # 买入点成交量放大比例输入框
         buy_volume_layout = BoxLayout(orientation='horizontal', size_hint_y=10, height=40)
-        buy_volume_label = Label(text='买入成交量放大:', size_hint_x=1, font_name='STKAITI', font_size=30)
+        buy_volume_label = Label(text='规则1：买入点成交量放大', size_hint_x=1, font_name='STKAITI', font_size=30)
         self.buy_volume_input = TextInput(
-            text='0.05', 
+            text='0.02', 
             hint_text='(如 0.05)', 
             multiline=False, 
             font_name='STKAITI', 
@@ -282,9 +315,9 @@ class InputScreen(Screen):
 
         # 卖出点成交量放大比例输入框
         sell_volume_layout = BoxLayout(orientation='horizontal', size_hint_y=10, height=40)
-        sell_volume_label = Label(text='卖出成交量放大:', size_hint_x=1, font_name='STKAITI', font_size=30)
+        sell_volume_label = Label(text='规则2：卖出点成交量放大', size_hint_x=1, font_name='STKAITI', font_size=30)
         self.sell_volume_input = TextInput(
-            text='0.05', 
+            text='0.02', 
             hint_text='(如 0.05)', 
             multiline=False, 
             font_name='STKAITI', 
@@ -295,6 +328,34 @@ class InputScreen(Screen):
         sell_volume_layout.add_widget(sell_volume_label)
         sell_volume_layout.add_widget(self.sell_volume_input)
         left_layout.add_widget(sell_volume_layout)
+
+        # 添加第一个选择框：卖出点价格必须高于上一个买入点
+        sell_above_buy_layout = BoxLayout(orientation='horizontal', size_hint_y=10, height=40)
+        sell_above_buy_label = Label(text='规则3：卖出点高于买入点', size_hint_x=1, font_name='STKAITI', font_size=30)
+        self.sell_above_buy_spinner = Spinner(
+            text='Yes', 
+            values=('Yes', 'No'), 
+            size_hint_x=0.7, 
+            font_name='STKAITI', 
+            font_size=30
+        )
+        sell_above_buy_layout.add_widget(sell_above_buy_label)
+        sell_above_buy_layout.add_widget(self.sell_above_buy_spinner)
+        left_layout.add_widget(sell_above_buy_layout)
+
+        # 添加第二个选择框：买入点价格必须低于上一个卖出点
+        buy_below_sell_layout = BoxLayout(orientation='horizontal', size_hint_y=10, height=40)
+        buy_below_sell_label = Label(text='规则4：买入点低于卖出点', size_hint_x=1, font_name='STKAITI', font_size=30)
+        self.buy_below_sell_spinner = Spinner(
+            text='No', 
+            values=('Yes', 'No'), 
+            size_hint_x=0.7, 
+            font_name='STKAITI', 
+            font_size=30
+        )
+        buy_below_sell_layout.add_widget(buy_below_sell_label)
+        buy_below_sell_layout.add_widget(self.buy_below_sell_spinner)
+        left_layout.add_widget(buy_below_sell_layout)
 
         # 运行按钮
         self.run_button = Button(
@@ -310,12 +371,12 @@ class InputScreen(Screen):
 
         # 下一页按钮
         self.next_button = Button(
-            text='查看买卖点', 
+            text='查看成交点', 
             size_hint_y=10, 
             height=40, 
             font_name='STKAITI', 
             font_size=25, 
-            background_color='blue'
+            background_color='yellow'
         )
         self.next_button.bind(on_press=self.go_to_sell_screen)
         left_layout.add_widget(self.next_button)
@@ -325,13 +386,13 @@ class InputScreen(Screen):
 
         # 结果显示标签
         self.result_label = Label(
-            text='Developed by 玉帛书影\n\n\t\t中国人寿 -- 601628.SH\n\t\t工商银行 -- 601398.SH\n\t\t长江电力 -- 600900.SH', 
+            text='Developed by 玉帛书影\n\n策略：\n1. MA一阶导数分析走势\n2. 成交量放大过滤窄幅震荡\n3. 自定义规则适度拟合', 
             size_hint_y=10, 
             height=100, 
             font_name='STKAITI', 
             font_size=30, 
             text_size=(None, None), 
-            halign='center', 
+            halign='left', 
             valign='middle'
         )
         right_layout.add_widget(self.result_label)
@@ -357,7 +418,7 @@ class InputScreen(Screen):
             message += '^o^ 请输入正确的回溯日期 ^o^\n'
         
         for code, name in HS300_STOCKS.items():
-            if self.stock_code_input.text == code:
+            if self.stock_name_input.text == name:
                 check_input2_ok = True
                 break
             
@@ -368,15 +429,17 @@ class InputScreen(Screen):
 
         if check_input1_ok and check_input2_ok:
             date_period = int(self.date_period_input.text)
-            stock_code = self.stock_code_input.text
+            stock_name = self.stock_name_input.text
             buy_volume_ratio = float(self.buy_volume_input.text)  # 获取买入点成交量放大比例
             sell_volume_ratio = float(self.sell_volume_input.text)  # 获取卖出点成交量放大比例
+            sell_above_buy = self.sell_above_buy_spinner.text == 'Yes'  # 获取第一个选择框的值
+            buy_below_sell = self.buy_below_sell_spinner.text == 'Yes'  # 获取第二个选择框的值
 
             # 运行主函数
-            self.stock_name, self.total_return, self.annualized_return = main(date_period, self.manager.get_screen('sell_screen'), stock_code, buy_volume_ratio, sell_volume_ratio)
+            self.stock_name, self.total_return, self.annualized_return = main(date_period, self.manager.get_screen('sell_screen'), stock_name, buy_volume_ratio, sell_volume_ratio, sell_above_buy, buy_below_sell)
 
             # 更新 result_label 显示总体收益和年化收益
-            self.result_label.text = f"{self.stock_name}\n 总收益率: {self.total_return:.2f}%\n年化收益率: {self.annualized_return:.2f}%"
+            self.result_label.text = f"股票名称：{self.stock_name}\n\n回溯区间收益率: {self.total_return:.2f}%\n折算年化收益率: {self.annualized_return:.2f}%"
         else:
             self.result_label.text = f"{message}"
 
@@ -385,23 +448,24 @@ class InputScreen(Screen):
         self.manager.current = 'sell_screen'
 
 # 修改 main 函数以返回总体收益和年化收益
-def main(date_period, sell_screen, stock_code, buy_volume_ratio, sell_volume_ratio):
+def main(date_period, sell_screen, stock_name, buy_volume_ratio, sell_volume_ratio, sell_above_buy, buy_below_sell):
     sell_stocks = []
     all_signals = []  # 用于存储所有买卖点
-    stock_name = 'OTHER'
+    stock_code = 'OTHER'
     total_return = 0  # 初始化总收益率
     annualized_return = 0  # 初始化年化收益率
-
-    if stock_code:
+    format_buy_date = ''
+    format_sell_date = ''
+    if stock_name:
         for code, name in HS300_STOCKS.items():
-            if stock_code == code:
-                stock_name = name
+            if stock_name == name:
+                stock_code = code
                 break
-        if stock_code:
+        if stock_code is not 'OTHER':
             try:
                 df = get_stock_data(stock_code, date_period)
                 df = calculate_indicators(df)
-                df = detect_signals(df, buy_volume_ratio, sell_volume_ratio)  # 传递成交量放大比例
+                df = detect_signals(df, buy_volume_ratio, sell_volume_ratio, sell_above_buy, buy_below_sell)  # 传递成交量放大比例和选择框参数
 
                 # 计算总收益率和年化收益率
                 total_return, annualized_return = calculate_return(df, date_period=date_period)
@@ -409,16 +473,18 @@ def main(date_period, sell_screen, stock_code, buy_volume_ratio, sell_volume_rat
                 # 遍历整个数据框，找到所有的买卖点
                 for index, row in df.iterrows():
                     if row['buy_signal']:
-                        all_signals.append((row['buy_date'], f"买入   {row['buy_date']}    {row['buy_close']}", 'buy'))
+                        format_buy_date = row['buy_date'][0:4]+'-'+row['buy_date'][4:6]+'-'+row['buy_date'][6:]
+                        all_signals.append((row['buy_date'], f"{stock_name}      买入   {format_buy_date}    {row['buy_close']}", 'buy'))
                     if row['sell_signal']:
+                        format_sell_date = row['sell_date'][0:4]+'-'+row['sell_date'][4:6]+'-'+row['sell_date'][6:]
                         sell_stocks.append(f"(卖点日期: {row['sell_date']}, 收盘价: {row['sell_close']})")
-                        all_signals.append((row['sell_date'], f"卖出   {row['sell_date']}    {row['sell_close']}", 'sell'))
+                        all_signals.append((row['sell_date'], f"{stock_name}      卖出   {format_sell_date}    {row['sell_close']}", 'sell'))
 
                 # 按照日期排序所有买卖点
                 all_signals.sort(key=lambda x: x[0])
 
             except Exception as e:
-                print(f"股票 {stock_name} 时出错: {e}")
+                print(f"股票 {stock_name} 出错: {e}")
 
     # 更新买点和卖点页面，并传递总收益率和年化收益率
     sell_screen.update_content(all_signals, total_return, annualized_return)
@@ -435,7 +501,6 @@ class StockApp(App):
         # 添加输入页面
         self.input_screen = InputScreen(name='input_screen')
         self.screen_manager.add_widget(self.input_screen)
-
 
         # 添加卖点页面
         self.sell_screen = SellScreen(name='sell_screen')
